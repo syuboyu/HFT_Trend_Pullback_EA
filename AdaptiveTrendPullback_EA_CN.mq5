@@ -36,10 +36,10 @@ input int                InpAdxPeriod         = 7;               // ADX 週期 (
 input int                InpAtrPeriod         = 7;               // ATR 週期 (ATR Period)
 
 input group "=== 訊號與市場過濾 (Signal Filters) ==="
-input double             InpAdxMinThreshold   = 22.0;            // 最小 ADX 趨勢門檻 (低於此值視為盤整不開倉)
+input double             InpAdxMinThreshold   = 25.0;            // 最小 ADX 趨勢門檻 (低於此值視為盤整不開倉)
 input double             InpRsiCrossLevel     = 50.0;            // RSI 穿越分水嶺 (預設 50 中軸)
 input int                InpSwingLookback     = 20;              // 波段高低點回溯根數 (Swing Lookback Bars)
-input double             InpMinEmaSeparationPts = 30;            // 快中均線最小間距 (點數，盤整黏合過濾)
+input double             InpMinEmaSeparationPts = 35;            // 快中均線最小間距 (點數，盤整黏合過濾)
 input double             InpMinAtrPoints      = 50;              // 最小 ATR 點數門檻 (過濾死寂市場)
 input double             InpMaxSpreadPoints   = 30;              // 最大允許點差點數 (點差過大不開倉)
 
@@ -61,7 +61,7 @@ input double              InpBreakoutRsiBuyMin = 55.0;            // 突破做�
 input double              InpBreakoutRsiSellMax= 45.0;            // 突破做空最大 RSI (低於此值確認弱勢)
 
 input group "=== 可選：交易時段過濾 (Session Filter, 伺服器時間) ==="
-input bool                InpUseSessionFilter  = false;           // 啟用時段過濾 (僅在指定時間內開倉)
+input bool                InpUseSessionFilter  = true;            // 啟用時段過濾 (僅在指定時間內開倉)
 input int                 InpSession1StartHour = 7;               // 第一時段起始小時 (例: 倫敦盤 7)
 input int                 InpSession1EndHour   = 16;              // 第一時段結束小時 (例: 倫敦盤 16)
 input bool                InpUseSession2       = true;            // 啟用第二時段窗口
@@ -70,9 +70,9 @@ input int                 InpSession2EndHour   = 21;              // 第二時�
 
 input group "=== 訂單追蹤與管理 (Trade Management) ==="
 input bool                InpOnePositionPerSide= true;            // 限制單方向僅持有一倉 (防止同向重複加倉)
-input bool                InpUseTrailingStop   = false;           // 啟用 ATR 移動停損 (Trailing Stop)
-input double              InpTrailingStartAtrMult = 1.0;          // 獲利達 x 倍 ATR 後啟動移動停損
-input double              InpTrailingStepAtrMult  = 0.5;          // 移動停損跟隨距離 (x 倍 ATR)
+input bool                InpUseTrailingStop   = true;            // 啟用 ATR 移動停損 (Trailing Stop)
+input double              InpTrailingStartAtrMult = 1.8;          // 獲利達 x 倍 ATR 後啟動移動停損
+input double              InpTrailingStepAtrMult  = 1.0;          // 移動停損跟隨距離 (x 倍 ATR)
 
 //============================== 全域變數 (GLOBALS) ==========================
 CTrade   trade;
