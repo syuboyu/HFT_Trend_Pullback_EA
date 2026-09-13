@@ -1,15 +1,20 @@
 //+------------------------------------------------------------------------+
 //|                                AdaptiveTrendPullback_EA_CN.mq5          |
-//|                    自適應趨勢回撤交易系統 (EMA/RSI/ADX/ATR 繁中參數版) |
+//|                    自適應趨勢回撤交易系統 (商業旗艦全功能版)           |
 //|                                                                        |
-//|  適用商品: 任意貨幣對 / 指數 (建議 EURUSD, H1 時框)                     |
-//|  邏輯架構: 均線趨勢排列 + 價格回踩 + RSI 中軸穿越 + ADX 趨勢強度過濾     |
-//|  風控機制: 動態 ATR 波段停損 / 1:2 停利 / 可選移動停損 / 可選突破引擎  |
+//|  適用商品: 任意貨幣對 / 指數 (最佳推薦 EURUSD, H1 時框)                |
+//|  核心模組:                                                             |
+//|   1. 均線趨勢排列 (EMA 20/50/100) + 價格回踩確認 + RSI 穿越 + ADX 強度 |
+//|   2. 大週期 H4 趨勢閘門 (Higher-TF EMA Gate, 順大勢過濾逆勢雜訊)       |
+//|   3. 兩階段保本鎖利 (1.0 ATR 移損開倉價保本 + 1.8 ATR 寬幅追蹤鎖利)   |
+//|   4. 進場冷卻機制 (Cooldown Bars, 阻斷震盪連敗割肉)                    |
+//|   5. 交易時段與週五避險過濾 (Session Filter & Weekend Guard)          |
+//|   6. 現代化圖表半透明視覺儀表板 (GUI Dashboard)                        |
 //+------------------------------------------------------------------------+
-#property copyright "Enterprise EA Development / Chinese Edition"
-#property version   "1.00"
+#property copyright "Enterprise EA Development / Chinese Flagship Edition"
+#property version   "2.00"
 #property strict
-#property description "自適應趨勢回撤系統 (Adaptive Trend Pullback EA) - 繁體中文參數版"
+#property description "自適應趨勢回撤交易系統 (Adaptive Trend Pullback EA) - 商業旗艦全功能版"
 
 #include <Trade\Trade.mqh>
 
@@ -43,36 +48,51 @@ input double             InpMinEmaSeparationPts = 35;            // 快中均線
 input double             InpMinAtrPoints      = 50;              // 最小 ATR 點數門檻 (過濾死寂市場)
 input double             InpMaxSpreadPoints   = 30;              // 最大允許點差點數 (點差過大不開倉)
 
-input group "=== 風險與停損停利 (Risk Management) ==="
+input group "=== 大週期趨勢閘門 (Higher-TF Filter) ==="
+input bool               InpUseHtfFilter      = true;            // 啟用大週期趨勢閘門 (順大勢過濾雜訊)
+input ENUM_TIMEFRAMES    InpHtfTimeframe      = PERIOD_H4;       // 大週期時框 (Higher Timeframe)
+input int                InpHtfEmaPeriod      = 200;             // 大週期基準均線週期 (EMA Period)
+
+input group "=== 風險與動態保本鎖利 (Risk & Two-Stage Trailing) ==="
 input double             InpAtrSlBufferMult   = 0.20;            // 波段外加 ATR 停損緩衝倍數 (SL = Swing ± x*ATR)
 input double             InpMinSlAtrMult      = 1.00;            // 最小停損距離 (至少 x*ATR 距離)
 input double             InpRiskRewardRatio   = 2.00;            // 停利風險報酬比 (R:R，例: 2.0 表示 1:2)
+input bool               InpUseBreakEven      = true;            // 啟用第一階段保本機制 (Break-Even)
+input double             InpBreakEvenAtrMult  = 1.0;             // 獲利達 x 倍 ATR 時觸發保本移損
+input double             InpBreakEvenBufferPts= 20;              // 保本加碼緩衝點數 (覆蓋點差與手續費)
+input bool               InpUseTrailingStop   = true;            // 啟用第二階段動態移動鎖利 (Trailing Stop)
+input double             InpTrailingStartAtrMult = 1.8;          // 獲利達 x 倍 ATR 後啟動移動鎖利
+input double             InpTrailingStepAtrMult  = 1.0;          // 移動鎖利跟隨距離 (x 倍 ATR)
 
 input group "=== 部位與手數管理 (Position Sizing) ==="
 input ENUM_LOT_MODE      InpLotSizeMode       = LOT_MODE_FIXED;  // 手數計算模式 (固定手數 / 風險比例)
 input double             InpFixedLotSize      = 0.10;            // 固定手數大小 (固定手數模式生效)
 input double             InpRiskPercent       = 1.00;            // 每筆交易風險比例 % (風險比例模式生效)
 
+input group "=== 平倉冷卻與風控機制 (Cooldown Filter) ==="
+input bool               InpUseCooldown       = true;            // 啟用平倉後進場冷卻 (防洗盤連續割肉)
+input int                InpCooldownBars      = 3;               // 平倉後冷卻 K 棒根數 (Cooldown Bars)
+
+input group "=== 交易時段與週末避險過濾 (Session & Weekend Guard) ==="
+input bool               InpUseSessionFilter  = true;            // 啟用交易時段過濾 (僅在指定窗口開倉)
+input int                InpSession1StartHour = 7;               // 第一時段起始小時 (倫敦盤 7)
+input int                InpSession1EndHour   = 16;              // 第一時段結束小時 (倫敦盤 16)
+input bool               InpUseSession2       = true;            // 啟用第二時段窗口
+input int                InpSession2StartHour = 12;              // 第二時段起始小時 (紐約盤 12)
+input int                InpSession2EndHour   = 21;              // 第二時段結束小時 (紐約盤 21)
+input bool               InpUseFridayFilter   = true;            // 啟用週五週末避險過濾
+input int                InpFridayStopHour    = 20;              // 週五停止開倉小時 (伺服器時間 20:00 後停開)
+
 input group "=== 可選：突破進場引擎 (Breakout Engine) ==="
-input bool                InpUseBreakoutEngine = false;           // 啟用突破進場模式 (Breakout Mode)
-input int                 InpBreakoutLookback  = 12;              // 突破回溯 K 棒根數 (Breakout Lookback Bars)
-input double              InpBreakoutAdxMin    = 22.0;            // 突破進場最小 ADX 門檻
-input double              InpBreakoutRsiBuyMin = 55.0;            // 突破做多最小 RSI (高於此值確認強勢)
-input double              InpBreakoutRsiSellMax= 45.0;            // 突破做空最大 RSI (低於此值確認弱勢)
+input bool               InpUseBreakoutEngine = false;           // 啟用突破進場模式 (Breakout Mode)
+input int                InpBreakoutLookback  = 12;              // 突破回溯 K 棒根數 (Breakout Lookback Bars)
+input double             InpBreakoutAdxMin    = 22.0;            // 突破進場最小 ADX 門檻
+input double             InpBreakoutRsiBuyMin = 55.0;            // 突破做多最小 RSI (高於此值確認強勢)
+input double             InpBreakoutRsiSellMax= 45.0;            // 突破做空最大 RSI (低於此值確認弱勢)
 
-input group "=== 可選：交易時段過濾 (Session Filter, 伺服器時間) ==="
-input bool                InpUseSessionFilter  = true;            // 啟用時段過濾 (僅在指定時間內開倉)
-input int                 InpSession1StartHour = 7;               // 第一時段起始小時 (例: 倫敦盤 7)
-input int                 InpSession1EndHour   = 16;              // 第一時段結束小時 (例: 倫敦盤 16)
-input bool                InpUseSession2       = true;            // 啟用第二時段窗口
-input int                 InpSession2StartHour = 12;              // 第二時段起始小時 (例: 紐約盤 12)
-input int                 InpSession2EndHour   = 21;              // 第二時段結束小時 (例: 紐約盤 21)
-
-input group "=== 訂單追蹤與管理 (Trade Management) ==="
-input bool                InpOnePositionPerSide= true;            // 限制單方向僅持有一倉 (防止同向重複加倉)
-input bool                InpUseTrailingStop   = true;            // 啟用 ATR 移動停損 (Trailing Stop)
-input double              InpTrailingStartAtrMult = 1.8;          // 獲利達 x 倍 ATR 後啟動移動停損
-input double              InpTrailingStepAtrMult  = 1.0;          // 移動停損跟隨距離 (x 倍 ATR)
+input group "=== 訂單追蹤與視覺看板 (Dashboard & UI) ==="
+input bool               InpOnePositionPerSide= true;            // 限制單方向僅持有一倉 (防止同向重複加倉)
+input bool               InpShowDashboard     = true;            // 顯示圖表半透明視覺儀表板
 
 //============================== 全域變數 (GLOBALS) ==========================
 CTrade   trade;
@@ -83,10 +103,52 @@ int      hEmaSlow   = INVALID_HANDLE;
 int      hRsi       = INVALID_HANDLE;
 int      hAdx       = INVALID_HANDLE;
 int      hAtr       = INVALID_HANDLE;
+int      hEmaHtf    = INVALID_HANDLE;
 
 datetime g_lastBarTime = 0;
 double   g_point       = 0.0;
 int      g_digits      = 0;
+string   g_dashPrefix  = "ATPB_Dash_";
+
+// 前向宣告子函數
+struct MarketSnapshot;
+bool FillSnapshot(MarketSnapshot &s);
+bool PassesNoTradeFilters(const MarketSnapshot &s);
+bool PassesSessionFilter();
+bool PassesFridayFilter();
+bool PassesCooldownFilter();
+bool PassesHtfFilter(int direction);
+bool InRange(int hour, int startHour, int endHour);
+bool GetSwingLowHigh(double &swingLow, double &swingHigh);
+int  CheckPullbackSignal(const MarketSnapshot &s);
+int  CheckBreakoutSignal(const MarketSnapshot &s);
+int  CountOwnPositions(int direction);
+double CalculateLotSize(double slDistance);
+void OpenPosition(int direction, const MarketSnapshot &s, const string signalTag);
+void ManageStops(const MarketSnapshot &s);
+void UpdateDashboard(const MarketSnapshot &s);
+void CleanupDashboard();
+
+//+------------------------------------------------------------------------+
+//| 市場數據快照結構                                                        |
+//+------------------------------------------------------------------------+
+struct MarketSnapshot
+  {
+   double emaFast[3];
+   double emaMedium[3];
+   double emaSlow[3];
+   double rsi[3];
+   double adxMain[3];
+   double atr[3];
+   double open[3];
+   double high[3];
+   double low[3];
+   double close[3];
+  };
+
+#define IDX_PREV2  0   // shift 3 (倒數第 3 根收盤 K)
+#define IDX_PREV1  1   // shift 2 (倒數第 2 根收盤 K)
+#define IDX_LAST   2   // shift 1 (剛收盤的第 1 根 K)
 
 //+------------------------------------------------------------------------+
 //| 初始化函數 (OnInit)                                                    |
@@ -122,17 +184,24 @@ int OnInit()
    hAdx       = iADX(_Symbol, InpTimeframe, InpAdxPeriod);
    hAtr       = iATR(_Symbol, InpTimeframe, InpAtrPeriod);
 
+   if(InpUseHtfFilter)
+      hEmaHtf = iMA(_Symbol, InpHtfTimeframe, InpHtfEmaPeriod, 0, MODE_EMA, PRICE_CLOSE);
+
    if(hEmaFast==INVALID_HANDLE || hEmaMedium==INVALID_HANDLE || hEmaSlow==INVALID_HANDLE ||
       hRsi==INVALID_HANDLE || hAdx==INVALID_HANDLE || hAtr==INVALID_HANDLE)
      {
-      Print("錯誤: 無法建立指標 Handle，請檢查圖表與數據。");
+      Print("錯誤: 無法建立主要指標 Handle，請檢查圖表數據。");
       return(INIT_FAILED);
+     }
+   if(InpUseHtfFilter && hEmaHtf==INVALID_HANDLE)
+     {
+      Print("警告: 無法建立大週期指標 Handle，大週期過濾將暫時跳過。");
      }
 
    trade.SetExpertMagicNumber(InpMagicNumber);
    trade.SetDeviationInPoints(InpSlippagePoints);
 
-   // 自動適配券商支援的成交模式 (避免 "Unsupported filling mode" 報錯)
+   // 自動適配券商支援的成交模式
    int fillingMask = (int)SymbolInfoInteger(_Symbol, SYMBOL_FILLING_MODE);
    if((fillingMask & SYMBOL_FILLING_FOK) != 0)
       trade.SetTypeFilling(ORDER_FILLING_FOK);
@@ -145,7 +214,7 @@ int OnInit()
    g_digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
    g_lastBarTime = 0;
 
-   Print("Adaptive Trend Pullback EA (中文版) 初始化成功。");
+   Print("Adaptive Trend Pullback EA (商業旗艦全功能版 v2.00) 初始化成功。");
    return(INIT_SUCCEEDED);
   }
 
@@ -160,6 +229,9 @@ void OnDeinit(const int reason)
    if(hRsi      !=INVALID_HANDLE) IndicatorRelease(hRsi);
    if(hAdx      !=INVALID_HANDLE) IndicatorRelease(hAdx);
    if(hAtr      !=INVALID_HANDLE) IndicatorRelease(hAtr);
+   if(hEmaHtf   !=INVALID_HANDLE) IndicatorRelease(hEmaHtf);
+
+   CleanupDashboard();
    Comment("");
   }
 
@@ -177,23 +249,6 @@ bool IsNewBar()
      }
    return(false);
   }
-
-//+------------------------------------------------------------------------+
-//| 市場數據快照結構                                                        |
-//+------------------------------------------------------------------------+
-struct MarketSnapshot
-  {
-   double emaFast[3];
-   double emaMedium[3];
-   double emaSlow[3];
-   double rsi[3];
-   double adxMain[3];
-   double atr[3];
-   double open[3];
-   double high[3];
-   double low[3];
-   double close[3];
-  };
 
 //+------------------------------------------------------------------------+
 //| 填入最新 3 根已收盤 K 棒之數據快照                                     |
@@ -220,16 +275,11 @@ bool FillSnapshot(MarketSnapshot &s)
       s.low[i]   = l[i];
       s.close[i] = c[i];
      }
-
    return(true);
   }
 
-#define IDX_PREV2  0   // shift 3 (倒數第 3 根收盤 K)
-#define IDX_PREV1  1   // shift 2 (倒數第 2 根收盤 K)
-#define IDX_LAST   2   // shift 1 (剛收盤的第 1 根 K)
-
 //+------------------------------------------------------------------------+
-//| 不開倉環境過濾: 點差 / ATR 波動度 / 均線黏合                           |
+//| 不開倉環境過濾: 點差 / ATR 波動度 / 均線黏合 / ADX                     |
 //+------------------------------------------------------------------------+
 bool PassesNoTradeFilters(const MarketSnapshot &s)
   {
@@ -269,14 +319,77 @@ bool PassesSessionFilter()
   }
 
 //+------------------------------------------------------------------------+
+//| 週五避險過濾 (週五美盤尾聲禁止新開倉)                                   |
+//+------------------------------------------------------------------------+
+bool PassesFridayFilter()
+  {
+   if(!InpUseFridayFilter) return(true);
+   MqlDateTime dt;
+   TimeToStruct(TimeCurrent(), dt);
+   if(dt.day_of_week == 5 && dt.hour >= InpFridayStopHour)
+      return(false);
+   return(true);
+  }
+
+//+------------------------------------------------------------------------+
+//| 進場冷卻機制 (平倉後 N 根 K 棒內禁止同 EA 重新進場)                    |
+//+------------------------------------------------------------------------+
+bool PassesCooldownFilter()
+  {
+   if(!InpUseCooldown || InpCooldownBars <= 0) return(true);
+   datetime fromTime = TimeCurrent() - 7 * 86400;
+   if(!HistorySelect(fromTime, TimeCurrent())) return(true);
+
+   int totalDeals = HistoryDealsTotal();
+   for(int i = totalDeals - 1; i >= 0; i--)
+     {
+      ulong ticket = HistoryDealGetTicket(i);
+      if(ticket == 0) continue;
+      if(HistoryDealGetString(ticket, DEAL_SYMBOL) != _Symbol) continue;
+      if(HistoryDealGetInteger(ticket, DEAL_MAGIC) != InpMagicNumber) continue;
+
+      ENUM_DEAL_ENTRY entry = (ENUM_DEAL_ENTRY)HistoryDealGetInteger(ticket, DEAL_ENTRY);
+      if(entry == DEAL_ENTRY_OUT || entry == DEAL_ENTRY_INOUT)
+        {
+         datetime dealTime = (datetime)HistoryDealGetInteger(ticket, DEAL_TIME);
+         int barsSinceDeal = iBarShift(_Symbol, InpTimeframe, dealTime);
+         if(barsSinceDeal >= 0 && barsSinceDeal < InpCooldownBars)
+            return(false); // 仍在冷卻期內
+         break;
+        }
+     }
+   return(true);
+  }
+
+//+------------------------------------------------------------------------+
+//| 大週期趨勢閘門過濾 (Higher-TF Gate)                                     |
+//+------------------------------------------------------------------------+
+bool PassesHtfFilter(int direction)
+  {
+   if(!InpUseHtfFilter) return(true);
+   if(hEmaHtf == INVALID_HANDLE) return(true);
+
+   double emaHtf[1];
+   double closeHtf[1];
+   if(CopyBuffer(hEmaHtf, 0, 1, 1, emaHtf) != 1) return(true);
+   if(CopyClose(_Symbol, InpHtfTimeframe, 1, 1, closeHtf) != 1) return(true);
+
+   if(direction == 1)  // 做多: H4 收盤價高於 H4 EMA
+      return(closeHtf[0] >= emaHtf[0]);
+   if(direction == -1) // 做空: H4 收盤價低於 H4 EMA
+      return(closeHtf[0] <= emaHtf[0]);
+
+   return(true);
+  }
+
+//+------------------------------------------------------------------------+
 //| 時段範圍判定 (支援跨午夜)                                              |
 //+------------------------------------------------------------------------+
 bool InRange(int hour, int startHour, int endHour)
   {
-   if(startHour==endHour) return(true); // 24小時
+   if(startHour==endHour) return(true);
    if(startHour < endHour)
       return(hour>=startHour && hour<endHour);
-   // 跨越午夜
    return(hour>=startHour || hour<endHour);
   }
 
@@ -454,6 +567,10 @@ void OpenPosition(int direction, const MarketSnapshot &s, const string signalTag
    if(InpOnePositionPerSide && CountOwnPositions(direction) > 0)
       return;
 
+   // 順大勢 H4 閘門審查
+   if(!PassesHtfFilter(direction))
+      return;
+
    double swingLow=0.0, swingHigh=0.0;
    if(!GetSwingLowHigh(swingLow, swingHigh))
       return;
@@ -507,11 +624,11 @@ void OpenPosition(int direction, const MarketSnapshot &s, const string signalTag
   }
 
 //+------------------------------------------------------------------------+
-//| 可選 ATR 移動停損管理                                                  |
+//| 兩階段保本與動態鎖利管理 (Break-Even & Two-Stage Trailing)              |
 //+------------------------------------------------------------------------+
-void ManageTrailingStop(const MarketSnapshot &s)
+void ManageStops(const MarketSnapshot &s)
   {
-   if(!InpUseTrailingStop) return;
+   if(!InpUseBreakEven && !InpUseTrailingStop) return;
 
    double atr = s.atr[IDX_LAST];
    if(atr<=0.0) return;
@@ -534,27 +651,139 @@ void ManageTrailingStop(const MarketSnapshot &s)
       double curSl     = PositionGetDouble(POSITION_SL);
       double curTp     = PositionGetDouble(POSITION_TP);
 
+      // 多單部位
       if(type==POSITION_TYPE_BUY)
         {
          double profit = tick.bid - openPrice;
-         if(profit >= InpTrailingStartAtrMult*atr)
+
+         // 1. 第一階段：保本移損 (達到 1.0 ATR 後拉至開倉價 + 緩衝點數)
+         if(InpUseBreakEven && profit >= InpBreakEvenAtrMult * atr)
            {
-            double newSl = NormalizeDouble(tick.bid - InpTrailingStepAtrMult*atr, g_digits);
-            if(newSl > curSl)
-               trade.PositionModify(ticket, newSl, curTp);
+            double beSl = NormalizeDouble(openPrice + InpBreakEvenBufferPts * g_point, g_digits);
+            if(beSl > curSl)
+              {
+               trade.PositionModify(ticket, beSl, curTp);
+               curSl = beSl;
+              }
+           }
+
+         // 2. 第二階段：動態移動鎖利 (達到 1.8 ATR 後寬幅跟隨)
+         if(InpUseTrailingStop && profit >= InpTrailingStartAtrMult * atr)
+           {
+            double trailSl = NormalizeDouble(tick.bid - InpTrailingStepAtrMult * atr, g_digits);
+            if(trailSl > curSl)
+              {
+               trade.PositionModify(ticket, trailSl, curTp);
+              }
            }
         }
+      // 空單部位
       else if(type==POSITION_TYPE_SELL)
         {
          double profit = openPrice - tick.ask;
-         if(profit >= InpTrailingStartAtrMult*atr)
+
+         // 1. 第一階段：保本移損
+         if(InpUseBreakEven && profit >= InpBreakEvenAtrMult * atr)
            {
-            double newSl = NormalizeDouble(tick.ask + InpTrailingStepAtrMult*atr, g_digits);
-            if(newSl < curSl || curSl==0.0)
-               trade.PositionModify(ticket, newSl, curTp);
+            double beSl = NormalizeDouble(openPrice - InpBreakEvenBufferPts * g_point, g_digits);
+            if(beSl < curSl || curSl==0.0)
+              {
+               trade.PositionModify(ticket, beSl, curTp);
+               curSl = beSl;
+              }
+           }
+
+         // 2. 第二階段：動態移動鎖利
+         if(InpUseTrailingStop && profit >= InpTrailingStartAtrMult * atr)
+           {
+            double trailSl = NormalizeDouble(tick.ask + InpTrailingStepAtrMult * atr, g_digits);
+            if(trailSl < curSl || curSl==0.0)
+              {
+               trade.PositionModify(ticket, trailSl, curTp);
+              }
            }
         }
      }
+  }
+
+//+------------------------------------------------------------------------+
+//| 更新圖表視覺化儀表板 (GUI Dashboard)                                   |
+//+------------------------------------------------------------------------+
+void UpdateDashboard(const MarketSnapshot &s)
+  {
+   if(!InpShowDashboard) return;
+   if(MQLInfoInteger(MQL_TESTER) && !MQLInfoInteger(MQL_VISUAL_MODE)) return;
+
+   int startX = 20;
+   int startY = 30;
+   int width  = 280;
+   int height = 210;
+
+   // 背景面板
+   string bgName = g_dashPrefix + "BG";
+   if(ObjectFind(0, bgName) < 0)
+     {
+      ObjectCreate(0, bgName, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, bgName, OBJPROP_XDISTANCE, startX);
+      ObjectSetInteger(0, bgName, OBJPROP_YDISTANCE, startY);
+      ObjectSetInteger(0, bgName, OBJPROP_XSIZE, width);
+      ObjectSetInteger(0, bgName, OBJPROP_YSIZE, height);
+      ObjectSetInteger(0, bgName, OBJPROP_BGCOLOR, C'20,24,35');
+      ObjectSetInteger(0, bgName, OBJPROP_BORDER_TYPE, BORDER_FLAT);
+      ObjectSetInteger(0, bgName, OBJPROP_COLOR, C'50,60,85');
+      ObjectSetInteger(0, bgName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+      ObjectSetInteger(0, bgName, OBJPROP_BACK, false);
+      ObjectSetInteger(0, bgName, OBJPROP_SELECTABLE, false);
+     }
+
+   double equity  = AccountInfoDouble(ACCOUNT_EQUITY);
+   double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+   double floatPnL= equity - balance;
+   int    spread  = (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
+
+   string htfStatus = "未啟用";
+   if(InpUseHtfFilter && hEmaHtf != INVALID_HANDLE)
+     {
+      double emaHtf[1], closeHtf[1];
+      if(CopyBuffer(hEmaHtf, 0, 1, 1, emaHtf)==1 && CopyClose(_Symbol, InpHtfTimeframe, 1, 1, closeHtf)==1)
+         htfStatus = (closeHtf[0] >= emaHtf[0]) ? "多頭 (Bullish)" : "空頭 (Bearish)";
+     }
+
+   string lines[8];
+   lines[0] = "【趨勢回撤旗艦系統 v2.0】";
+   lines[1] = StringFormat("帳戶餘額: $%.2f | 浮動: $%.2f", balance, floatPnL);
+   lines[2] = StringFormat("商品/時框: %s (%s)", _Symbol, EnumToString(InpTimeframe));
+   lines[3] = StringFormat("當前點差: %d pts (門檻 %d)", spread, (int)InpMaxSpreadPoints);
+   lines[4] = StringFormat("ADX 強度: %.1f (門檻 %.1f)", s.adxMain[IDX_LAST], InpAdxMinThreshold);
+   lines[5] = StringFormat("H4 趨勢閘門: %s", htfStatus);
+   lines[6] = StringFormat("多單持倉: %d | 空單持倉: %d", CountOwnPositions(1), CountOwnPositions(-1));
+   lines[7] = "風控機制: 保本(1.0) + 追蹤(1.8) + 週五避險";
+
+   for(int i=0; i<8; i++)
+     {
+      string lblName = g_dashPrefix + "Lbl_" + IntegerToString(i);
+      if(ObjectFind(0, lblName) < 0)
+        {
+         ObjectCreate(0, lblName, OBJ_LABEL, 0, 0, 0);
+         ObjectSetInteger(0, lblName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+         ObjectSetInteger(0, lblName, OBJPROP_XDISTANCE, startX + 12);
+         ObjectSetInteger(0, lblName, OBJPROP_YDISTANCE, startY + 12 + i * 23);
+         ObjectSetString(0,  lblName, OBJPROP_FONT, "Segoe UI");
+         ObjectSetInteger(0, lblName, OBJPROP_FONTSIZE, (i==0)? 10 : 9);
+         ObjectSetInteger(0, lblName, OBJPROP_SELECTABLE, false);
+        }
+      color txtColor = (i==0) ? C'0,220,255' : (i==1 && floatPnL>=0)? C'70,255,140' : (i==1 && floatPnL<0)? C'255,100,100' : C'220,225,235';
+      ObjectSetInteger(0, lblName, OBJPROP_COLOR, txtColor);
+      ObjectSetString(0,  lblName, OBJPROP_TEXT, lines[i]);
+     }
+  }
+
+//+------------------------------------------------------------------------+
+//| 清除圖表視覺化儀表板物件                                               |
+//+------------------------------------------------------------------------+
+void CleanupDashboard()
+  {
+   ObjectsDeleteAll(0, g_dashPrefix);
   }
 
 //+------------------------------------------------------------------------+
@@ -562,39 +791,37 @@ void ManageTrailingStop(const MarketSnapshot &s)
 //+------------------------------------------------------------------------+
 void OnTick()
   {
-   // 圖表左上角顯示狀態資訊
-   double equity  = AccountInfoDouble(ACCOUNT_EQUITY);
-   double balance = AccountInfoDouble(ACCOUNT_BALANCE);
-   double floatPnL= equity - balance;
-   Comment(StringFormat("【Adaptive Trend Pullback EA 中文版】\n" +
-                        "帳戶餘額 (Balance): %.2f | 淨值 (Equity): %.2f | 浮動盈虧: %.2f\n" +
-                        "當前點差 (Spread): %d pts | 運行時框: %s",
-                        balance, equity, floatPnL,
-                        (int)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD),
-                        EnumToString(InpTimeframe)));
-
    MarketSnapshot s;
-
-   // 移動停損在每個 tick 均執行判定
-   if(InpUseTrailingStop)
-     {
-      if(FillSnapshot(s))
-         ManageTrailingStop(s);
-     }
-
-   // 進場訊號僅在 K 棒剛收盤 (新 K 棒生成時) 判定一次
-   if(!IsNewBar())
-      return;
-
    if(!FillSnapshot(s))
       return;
 
+   // 1. 每 tick 執行保本移損與動態移動鎖利管理
+   ManageStops(s);
+
+   // 2. 更新儀表板顯示
+   UpdateDashboard(s);
+
+   // 3. 進場訊號僅在新 K 棒生成 (剛收盤一根) 判定
+   if(!IsNewBar())
+      return;
+
+   // 4. 時段窗口過濾
    if(!PassesSessionFilter())
       return;
 
+   // 5. 週五收盤避險過濾
+   if(!PassesFridayFilter())
+      return;
+
+   // 6. 平倉後冷卻期過濾
+   if(!PassesCooldownFilter())
+      return;
+
+   // 7. 市場雜訊與波動度過濾 (點差 / ATR / 均線黏合 / ADX)
    if(!PassesNoTradeFilters(s))
       return;
 
+   // 8. 核心趨勢回踩訊號判定
    int pullbackSignal = CheckPullbackSignal(s);
    if(pullbackSignal!=0)
      {
@@ -602,6 +829,7 @@ void OnTick()
       return;
      }
 
+   // 9. 可選突破進場引擎判定
    int breakoutSignal = CheckBreakoutSignal(s);
    if(breakoutSignal!=0)
      {
