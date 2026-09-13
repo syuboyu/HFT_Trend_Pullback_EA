@@ -1,0 +1,97 @@
+//@version=5
+strategy("Adaptive Trend Pullback (Boxxocode / Claude AI)", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=10, currency=currency.USD)
+
+// === Indicator Inputs ===
+grp_ind = "=== Indicator Periods ==="
+emaFastLen   = input.int(20, "EMA Fast", group=grp_ind)
+emaMedLen    = input.int(50, "EMA Medium", group=grp_ind)
+emaSlowLen   = input.int(100, "EMA Slow", group=grp_ind)
+rsiLen       = input.int(7, "RSI Period", group=grp_ind)
+adxLen       = input.int(7, "ADX Period", group=grp_ind)
+atrLen       = input.int(7, "ATR Period", group=grp_ind)
+
+grp_filt = "=== Signal Filters ==="
+adxMin       = input.float(22.0, "Min ADX", group=grp_filt)
+rsiLevel     = input.float(50.0, "RSI Level", group=grp_filt)
+swingLookback= input.int(20, "Swing Lookback Bars", group=grp_filt)
+
+grp_risk = "=== Risk Management ==="
+atrSlBufferMult = input.float(0.20, "SL ATR Buffer Multiplier", group=grp_risk)
+minSlAtrMult    = input.float(1.00, "Min SL ATR Multiplier", group=grp_risk)
+rrRatio         = input.float(2.00, "Risk:Reward Ratio", group=grp_risk)
+
+// === Calculations ===
+emaFast = ta.ema(close, emaFastLen)
+emaMed  = ta.ema(close, emaMedLen)
+emaSlow = ta.ema(close, emaSlowLen)
+rsiVal  = ta.rsi(close, rsiLen)
+atrVal  = ta.atr(atrLen)
+
+// ADX calculation (Wilder's DMI)
+dirmov(len) =>
+    up = ta.change(high)
+    down = -ta.change(low)
+    plusDM = na(up) ? na : (up > down and up > 0 ? up : 0)
+    minusDM = na(down) ? na : (down > up and down > 0 ? down : 0)
+    truerange = ta.rma(ta.tr, len)
+    plus = fixnan(100 * ta.rma(plusDM, len) / truerange)
+    minus = fixnan(100 * ta.rma(minusDM, len) / truerange)
+    [plus, minus]
+
+adx(len) =>
+    [plus, minus] = dirmov(len)
+    sum = plus + minus
+    adxVal = 100 * ta.rma(math.abs(plus - minus) / (sum == 0 ? 1 : sum), len)
+    adxVal
+
+adxVal = adx(adxLen)
+
+// Swing High/Low
+swingLow  = ta.lowest(low, swingLookback)[1]
+swingHigh = ta.highest(high, swingLookback)[1]
+
+// === Strategy Conditions ===
+trendUp   = (emaFast > emaMed) and (emaMed > emaSlow) and (close > emaSlow)
+trendDown = (emaFast < emaMed) and (emaMed < emaSlow) and (close < emaSlow)
+
+// Pullback
+pulledBackBuy  = (low <= emaFast or low <= emaMed) and (close >= emaMed)
+rsiCrossUp     = (rsiVal[1] < rsiLevel) and (rsiVal > rsiLevel)
+bullishCandle  = (close > open) and (close > high[1])
+buySignal      = trendUp and (adxVal > adxMin) and pulledBackBuy and rsiCrossUp and bullishCandle
+
+pulledBackSell = (high >= emaFast or high >= emaMed) and (close <= emaMed)
+rsiCrossDown   = (rsiVal[1] > rsiLevel) and (rsiVal < rsiLevel)
+bearishCandle  = (close < open) and (close < low[1])
+sellSignal     = trendDown and (adxVal > adxMin) and pulledBackSell and rsiCrossDown and bearishCandle
+
+// === Trade Execution ===
+var float buySl = na
+var float buyTp = na
+var float sellSl = na
+var float sellTp = na
+
+if (buySignal and strategy.position_size == 0)
+    rawSlDist = close - (swingLow - atrSlBufferMult * atrVal)
+    actualSlDist = math.max(rawSlDist, minSlAtrMult * atrVal)
+    buySl := close - actualSlDist
+    buyTp := close + rrRatio * actualSlDist
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Exit Long", "Long", stop=buySl, limit=buyTp)
+
+if (sellSignal and strategy.position_size == 0)
+    rawSlDist = (swingHigh + atrSlBufferMult * atrVal) - close
+    actualSlDist = math.max(rawSlDist, minSlAtrMult * atrVal)
+    sellSl := close + actualSlDist
+    sellTp := close - rrRatio * actualSlDist
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Exit Short", "Short", stop=sellSl, limit=sellTp)
+
+// Plot EMAs
+plot(emaFast, "EMA Fast (20)", color=color.blue, linewidth=1)
+plot(emaMed,  "EMA Med (50)",  color=color.orange, linewidth=2)
+plot(emaSlow, "EMA Slow (100)", color=color.red, linewidth=2)
+
+// Plot Entry Signals
+plotshape(buySignal, "Buy Signal", shape.triangleup, location.belowbar, color.green, size=size.small)
+plotshape(sellSignal, "Sell Signal", shape.triangledown, location.abovebar, color.red, size=size.small)
