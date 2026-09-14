@@ -19,10 +19,17 @@
 #include <Trade\Trade.mqh>
 
 //============================== 列舉選單 (ENUMS) ===========================
+//============================== 列舉選單 (ENUMS) ===========================
 enum ENUM_LOT_MODE
   {
    LOT_MODE_FIXED        = 0, // 固定手數 (Fixed Lot)
    LOT_MODE_RISK_PERCENT = 1  // 依帳戶權益風險比例 (Risk Percent)
+  };
+
+enum ENUM_SL_MODE
+  {
+   SL_MODE_ATR_FIXED     = 0, // 標準精準 ATR 模式 (推薦: 盈虧比嚴格對稱)
+   SL_MODE_SWING_BOUNDED = 1  // 波段高低點模式 (附帶 ATR 封頂保護)
   };
 
 //============================== 參數設定 (INPUTS) ==========================
@@ -33,9 +40,9 @@ input int               InpSlippagePoints     = 20;              // 最大允許
 input ENUM_TIMEFRAMES   InpTimeframe          = PERIOD_H1;       // 策略運作時框 (Working Timeframe)
 
 input group "=== 指標週期設定 (Indicator Periods) ==="
-input int                InpEmaFastPeriod     = 20;              // 快線 EMA 週期 (Fast EMA Period)
-input int                InpEmaMediumPeriod   = 50;              // 中線 EMA 週期 (Medium EMA Period)
-input int                InpEmaSlowPeriod     = 100;             // 慢線 EMA 週期 (Slow EMA Period)
+input int                InpEmaFastPeriod     = 10;              // 快線 EMA 週期 (Fast EMA Period)
+input int                InpEmaMediumPeriod   = 20;              // 中線 EMA 週期 (Medium EMA Period)
+input int                InpEmaSlowPeriod     = 50;              // 慢線 EMA 週期 (Slow EMA Period)
 input int                InpRsiPeriod         = 7;               // RSI 週期 (RSI Period)
 input int                InpAdxPeriod         = 7;               // ADX 週期 (ADX Period)
 input int                InpAtrPeriod         = 7;               // ATR 週期 (ATR Period)
@@ -44,7 +51,7 @@ input group "=== 訊號與市場過濾 (Signal Filters) ==="
 input double             InpAdxMinThreshold   = 25.0;            // 最小 ADX 趨勢門檻 (低於此值視為盤整不開倉)
 input double             InpRsiCrossLevel     = 50.0;            // RSI 穿越分水嶺 (預設 50 中軸)
 input int                InpSwingLookback     = 20;              // 波段高低點回溯根數 (Swing Lookback Bars)
-input double             InpMinEmaSeparationPts = 35;            // 快中均線最小間距 (點數，盤整黏合過濾)
+input double             InpMinEmaSeparationPts = 25;            // 快中均線最小間距 (點數，盤整黏合過濾)
 input double             InpMinAtrPoints      = 50;              // 最小 ATR 點數門檻 (過濾死寂市場)
 input double             InpMaxSpreadPoints   = 30;              // 最大允許點差點數 (點差過大不開倉)
 
@@ -53,15 +60,19 @@ input bool               InpUseHtfFilter      = true;            // 啟用大週
 input ENUM_TIMEFRAMES    InpHtfTimeframe      = PERIOD_H4;       // 大週期時框 (Higher Timeframe)
 input int                InpHtfEmaPeriod      = 200;             // 大週期基準均線週期 (EMA Period)
 
-input group "=== 風險與動態保本鎖利 (Risk & Two-Stage Trailing) ==="
-input double             InpAtrSlBufferMult   = 0.20;            // 波段外加 ATR 停損緩衝倍數 (SL = Swing ± x*ATR)
-input double             InpMinSlAtrMult      = 1.00;            // 最小停損距離 (至少 x*ATR 距離)
-input double             InpRiskRewardRatio   = 2.00;            // 停利風險報酬比 (R:R，例: 2.0 表示 1:2)
-input bool               InpUseBreakEven      = true;            // 啟用第一階段保本機制 (Break-Even)
-input double             InpBreakEvenAtrMult  = 1.0;             // 獲利達 x 倍 ATR 時觸發保本移損
-input double             InpBreakEvenBufferPts= 20;              // 保本加碼緩衝點數 (覆蓋點差與手續費)
-input bool               InpUseTrailingStop   = true;            // 啟用第二階段動態移動鎖利 (Trailing Stop)
-input double             InpTrailingStartAtrMult = 1.8;          // 獲利達 x 倍 ATR 後啟動移動鎖利
+input group "=== 風險結構與標準化盈虧比 (Risk & Win/Loss Structure) ==="
+input ENUM_SL_MODE       InpSlMode            = SL_MODE_ATR_FIXED; // 停損停利計算架構 (精準 ATR / 波段封頂)
+input double             InpSlAtrMult         = 1.00;            // 基準停損 ATR 倍數 (嚴控單筆損失在 $25 內)
+input double             InpTpAtrMult         = 1.80;            // 目標停利 ATR 倍數 (鎖定 1.8 倍利潤)
+input double             InpMaxSlPoints       = 350.0;           // 單筆最大停損點數上限保護 (35 pips, 防止極端暴賠)
+input double             InpAtrSlBufferMult   = 0.20;            // [波段模式] ATR 停損外加緩衝倍數
+input double             InpMinSlAtrMult      = 1.00;            // [波段模式] 最小停損 ATR 倍數
+input double             InpRiskRewardRatio   = 1.80;            // [波段模式] 停利風險報酬比 (R:R)
+input bool               InpUseBreakEven      = false;           // 啟用第一階段保本機制 (預設關閉防利潤截斷)
+input double             InpBreakEvenAtrMult  = 1.4;             // 獲利達 x 倍 ATR 時觸發保本移損
+input double             InpBreakEvenBufferPts= 10;              // 保本加碼緩衝點數
+input bool               InpUseTrailingStop   = false;           // 啟用第二階段動態移動鎖利
+input double             InpTrailingStartAtrMult = 2.0;          // 獲利達 x 倍 ATR 後啟動移動鎖利
 input double             InpTrailingStepAtrMult  = 1.0;          // 移動鎖利跟隨距離 (x 倍 ATR)
 
 input group "=== 部位與手數管理 (Position Sizing) ==="
@@ -571,12 +582,8 @@ void OpenPosition(int direction, const MarketSnapshot &s, const string signalTag
    if(!PassesHtfFilter(direction))
       return;
 
-   double swingLow=0.0, swingHigh=0.0;
-   if(!GetSwingLowHigh(swingLow, swingHigh))
-      return;
-
    double atr = s.atr[IDX_LAST];
-   double minSlDist = InpMinSlAtrMult * atr;
+   if(atr<=0.0) return;
 
    MqlTick tick;
    if(!SymbolInfoTick(_Symbol, tick))
@@ -584,25 +591,61 @@ void OpenPosition(int direction, const MarketSnapshot &s, const string signalTag
 
    double entryPrice, slPrice, tpPrice, slDistance;
 
-   if(direction==1)
+   // 1. 標準精準 ATR 停損停利模式 (嚴格鎖定盈虧比)
+   if(InpSlMode == SL_MODE_ATR_FIXED)
      {
-      entryPrice = tick.ask;
-      slPrice    = swingLow - InpAtrSlBufferMult*atr;
-      slDistance = entryPrice - slPrice;
-      if(slDistance < minSlDist)
-         slPrice = entryPrice - minSlDist;
-      slDistance = entryPrice - slPrice;
-      tpPrice    = entryPrice + InpRiskRewardRatio * slDistance;
+      slDistance = InpSlAtrMult * atr;
+      if(InpMaxSlPoints > 0.0 && slDistance > InpMaxSlPoints * g_point)
+         slDistance = InpMaxSlPoints * g_point;
+
+      double tpDistance = InpTpAtrMult * atr;
+
+      if(direction == 1)
+        {
+         entryPrice = tick.ask;
+         slPrice    = entryPrice - slDistance;
+         tpPrice    = entryPrice + tpDistance;
+        }
+      else
+        {
+         entryPrice = tick.bid;
+         slPrice    = entryPrice + slDistance;
+         tpPrice    = entryPrice - tpDistance;
+        }
      }
+   // 2. 波段高低點模式 (附帶上限封頂防暴賠保護)
    else
      {
-      entryPrice = tick.bid;
-      slPrice    = swingHigh + InpAtrSlBufferMult*atr;
-      slDistance = slPrice - entryPrice;
-      if(slDistance < minSlDist)
-         slPrice = entryPrice + minSlDist;
-      slDistance = slPrice - entryPrice;
-      tpPrice    = entryPrice - InpRiskRewardRatio * slDistance;
+      double swingLow=0.0, swingHigh=0.0;
+      if(!GetSwingLowHigh(swingLow, swingHigh))
+         return;
+
+      double minSlDist = InpMinSlAtrMult * atr;
+
+      if(direction == 1)
+        {
+         entryPrice = tick.ask;
+         slPrice    = swingLow - InpAtrSlBufferMult * atr;
+         slDistance = entryPrice - slPrice;
+         if(slDistance < minSlDist)
+            slPrice = entryPrice - minSlDist;
+         if(InpMaxSlPoints > 0.0 && (entryPrice - slPrice) > InpMaxSlPoints * g_point)
+            slPrice = entryPrice - InpMaxSlPoints * g_point;
+         slDistance = entryPrice - slPrice;
+         tpPrice    = entryPrice + InpRiskRewardRatio * slDistance;
+        }
+      else
+        {
+         entryPrice = tick.bid;
+         slPrice    = swingHigh + InpAtrSlBufferMult * atr;
+         slDistance = slPrice - entryPrice;
+         if(slDistance < minSlDist)
+            slPrice = entryPrice + minSlDist;
+         if(InpMaxSlPoints > 0.0 && (slPrice - entryPrice) > InpMaxSlPoints * g_point)
+            slPrice = entryPrice + InpMaxSlPoints * g_point;
+         slDistance = slPrice - entryPrice;
+         tpPrice    = entryPrice - InpRiskRewardRatio * slDistance;
+        }
      }
 
    if(slDistance<=0.0)
