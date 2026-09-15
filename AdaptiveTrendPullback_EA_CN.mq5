@@ -12,9 +12,9 @@
 //|   6. 現代化圖表半透明視覺儀表板 (GUI Dashboard)                        |
 //+------------------------------------------------------------------------+
 #property copyright "Enterprise EA Development / Chinese Flagship Edition"
-#property version   "2.00"
+#property version   "2.20"
 #property strict
-#property description "自適應趨勢回撤交易系統 (Adaptive Trend Pullback EA) - 商業旗艦全功能版"
+#property description "自適應趨勢回撤交易系統 (Adaptive Trend Pullback EA) - 商業旗艦全功能加倉版"
 
 #include <Trade\Trade.mqh>
 
@@ -30,6 +30,14 @@ enum ENUM_SL_MODE
   {
    SL_MODE_ATR_FIXED     = 0, // 標準精準 ATR 模式 (推薦: 盈虧比嚴格對稱)
    SL_MODE_SWING_BOUNDED = 1  // 波段高低點模式 (附帶 ATR 封頂保護)
+  };
+
+enum ENUM_SCALING_MODE
+  {
+   SCALING_NONE          = 0, // 關閉加倉 (單進單出，目前基準模式)
+   SCALING_PYRAMID       = 1, // 方案 A：順勢金字塔盈利加倉 (保本後才加碼)
+   SCALING_GRID          = 2, // 方案 B：回調網格逆勢補倉 (拉低均價 + 籃子出場)
+   SCALING_BOTH          = 3  // 方案 A+B：複合模式 (回調補倉 + 盈利金字塔)
   };
 
 //============================== 參數設定 (INPUTS) ==========================
@@ -101,8 +109,19 @@ input double             InpBreakoutAdxMin    = 22.0;            // 突破進場
 input double             InpBreakoutRsiBuyMin = 55.0;            // 突破做多最小 RSI (高於此值確認強勢)
 input double             InpBreakoutRsiSellMax= 45.0;            // 突破做空最大 RSI (低於此值確認弱勢)
 
+input group "=== 倉位加倉管理模組 (Scaling Engine) ==="
+input ENUM_SCALING_MODE  InpScalingMode       = SCALING_GRID;    // 加倉模式 (預設 SCALING_GRID: 方案 B 回調補倉)
+input int                InpMaxPyramidOrders  = 2;               // [方案 A] 金字塔最大加碼次數 (含首單最多 1+N 筆)
+input double             InpPyramidTriggerAtr = 1.0;             // [方案 A] 金字塔加碼門檻 (前單浮盈達 N 倍 ATR 且已保本)
+input double             InpPyramidLotRatio   = 1.0;             // [方案 A] 金字塔加碼手數比例 (1.0=等額, 0.5=減半)
+input int                InpMaxGridOrders     = 2;               // [方案 B] 網格最大補倉次數 (含首單最多 1+N 筆)
+input double             InpGridStepAtrMult   = 1.0;             // [方案 B] 網格補倉步長 (逆向回調達 N 倍 ATR)
+input double             InpGridLotMult       = 1.0;             // [方案 B] 網格補倉手數倍數 (1.0=平手, 1.2=溫和馬丁)
+input double             InpGridBasketTpPoints= 100.0;           // [方案 B] 網格整體籃子獲利目標點數 (均價浮盈點數)
+input double             InpGridBasketSlPoints= 350.0;           // [方案 B] 網格整體籃子硬停損點數 (均價浮虧點數，防極端逆轉)
+
 input group "=== 訂單追蹤與視覺看板 (Dashboard & UI) ==="
-input bool               InpOnePositionPerSide= true;            // 限制單方向僅持有一倉 (防止同向重複加倉)
+input bool               InpOnePositionPerSide= true;            // 限制單方向僅持有一倉 (加倉模式為 NONE 時強制生效)
 input bool               InpShowDashboard     = true;            // 顯示圖表半透明視覺儀表板
 
 //============================== 全域變數 (GLOBALS) ==========================
@@ -571,12 +590,288 @@ double CalculateLotSize(double slDistance)
   }
 
 //+------------------------------------------------------------------------+
+//| 檢查是否符合順勢金字塔盈利加倉條件 (方案 A)                             |
+//+------------------------------------------------------------------------+
+bool CanOpenPyramid(int direction, double atr, double &outLotRatio)
+  {
+   outLotRatio = InpPyramidLotRatio;
+   int curCount = CountOwnPositions(direction);
+   if(curCount <= 0) return(false);
+   if(curCount >= (1 + InpMaxPyramidOrders)) return(false);
+
+   MqlTick tick;
+   if(!SymbolInfoTick(_Symbol, tick)) return(false);
+
+   bool allSecured = false;
+   int total = PositionsTotal();
+   for(int i=0; i<total; i++)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket==0 || !PositionSelectByTicket(ticket)) continue;
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+      if(PositionGetInteger(POSITION_MAGIC) != InpMagicNumber) continue;
+
+      long type = PositionGetInteger(POSITION_TYPE);
+      if((direction==1 && type==POSITION_TYPE_BUY) || (direction==-1 && type==POSITION_TYPE_SELL))
+        {
+         double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+         double curSl     = PositionGetDouble(POSITION_SL);
+
+         if(direction == 1) // 多單
+           {
+            double profit = tick.bid - openPrice;
+            if(profit >= InpPyramidTriggerAtr * atr && curSl >= openPrice)
+               allSecured = true;
+            else
+               return(false); // 若現有持倉未完全移至保本或盈利未達標，不加倉
+           }
+         else // 空單
+           {
+            double profit = openPrice - tick.ask;
+            if(profit >= InpPyramidTriggerAtr * atr && curSl <= openPrice && curSl > 0.0)
+               allSecured = true;
+            else
+               return(false);
+           }
+        }
+     }
+
+   return(allSecured);
+  }
+
+//+------------------------------------------------------------------------+
+//| 取得某方向最新一筆訂單之開倉價與手數                                    |
+//+------------------------------------------------------------------------+
+bool GetLatestPositionInfo(int direction, double &lastOpenPrice, double &lastLot, datetime &lastOpenTime)
+  {
+   lastOpenPrice = 0.0;
+   lastLot       = 0.0;
+   lastOpenTime  = 0;
+
+   int total = PositionsTotal();
+   for(int i=0; i<total; i++)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket==0 || !PositionSelectByTicket(ticket)) continue;
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+      if(PositionGetInteger(POSITION_MAGIC) != InpMagicNumber) continue;
+
+      long type = PositionGetInteger(POSITION_TYPE);
+      if((direction==1 && type==POSITION_TYPE_BUY) || (direction==-1 && type==POSITION_TYPE_SELL))
+        {
+         datetime posTime = (datetime)PositionGetInteger(POSITION_TIME);
+         if(posTime > lastOpenTime)
+           {
+            lastOpenTime  = posTime;
+            lastOpenPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+            lastLot       = PositionGetDouble(POSITION_VOLUME);
+           }
+        }
+     }
+   return(lastOpenTime > 0);
+  }
+
+//+------------------------------------------------------------------------+
+//| 一鍵關閉指定方向所有 EA 倉位                                           |
+//+------------------------------------------------------------------------+
+void CloseAllPositions(int direction)
+  {
+   for(int i=PositionsTotal()-1; i>=0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket==0 || !PositionSelectByTicket(ticket)) continue;
+      if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+      if(PositionGetInteger(POSITION_MAGIC) != InpMagicNumber) continue;
+
+      long type = PositionGetInteger(POSITION_TYPE);
+      if((direction==1 && type==POSITION_TYPE_BUY) || (direction==-1 && type==POSITION_TYPE_SELL))
+        {
+         trade.PositionClose(ticket);
+        }
+     }
+  }
+
+//+------------------------------------------------------------------------+
+//| 回調網格逆勢補倉管理 (方案 B)                                           |
+//+------------------------------------------------------------------------+
+void ManageGridScaling(const MarketSnapshot &s)
+  {
+   if(InpScalingMode != SCALING_GRID && InpScalingMode != SCALING_BOTH)
+      return;
+
+   double atr = s.atr[IDX_LAST];
+   if(atr <= 0.0) return;
+
+   MqlTick tick;
+   if(!SymbolInfoTick(_Symbol, tick)) return;
+
+   // 1. 多單網格檢查
+   int buyCount = CountOwnPositions(1);
+   if(buyCount > 0 && buyCount < (1 + InpMaxGridOrders))
+     {
+      double lastPrice, lastLot;
+      datetime lastTime;
+      if(GetLatestPositionInfo(1, lastPrice, lastLot, lastTime))
+        {
+         double stepDist = InpGridStepAtrMult * atr;
+         if(tick.ask <= lastPrice - stepDist)
+           {
+            double newLot = NormalizeDouble(lastLot * InpGridLotMult, 2);
+            double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+            double maxLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+            if(newLot < minLot) newLot = minLot;
+            if(newLot > maxLot) newLot = maxLot;
+
+            trade.Buy(newLot, _Symbol, tick.ask, 0.0, 0.0, InpTradeComment + "_Grid");
+           }
+        }
+     }
+
+   // 2. 空單網格檢查
+   int sellCount = CountOwnPositions(-1);
+   if(sellCount > 0 && sellCount < (1 + InpMaxGridOrders))
+     {
+      double lastPrice, lastLot;
+      datetime lastTime;
+      if(GetLatestPositionInfo(-1, lastPrice, lastLot, lastTime))
+        {
+         double stepDist = InpGridStepAtrMult * atr;
+         if(tick.bid >= lastPrice + stepDist)
+           {
+            double newLot = NormalizeDouble(lastLot * InpGridLotMult, 2);
+            double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+            double maxLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+            if(newLot < minLot) newLot = minLot;
+            if(newLot > maxLot) newLot = maxLot;
+
+            trade.Sell(newLot, _Symbol, tick.bid, 0.0, 0.0, InpTradeComment + "_Grid");
+           }
+        }
+     }
+  }
+
+//+------------------------------------------------------------------------+
+//| 多單與網格訂單之整體籃子停利/停損管理                                  |
+//+------------------------------------------------------------------------+
+void ManageBasketOrders(const MarketSnapshot &s)
+  {
+   if(InpScalingMode != SCALING_GRID && InpScalingMode != SCALING_BOTH)
+      return;
+
+   MqlTick tick;
+   if(!SymbolInfoTick(_Symbol, tick)) return;
+
+   // 1. 多單籃子管理
+   int buyCount = CountOwnPositions(1);
+   if(buyCount >= 2)
+     {
+      double sumPriceVol = 0.0;
+      double totalVol    = 0.0;
+      int total = PositionsTotal();
+      for(int i=0; i<total; i++)
+        {
+         ulong ticket = PositionGetTicket(i);
+         if(ticket==0 || !PositionSelectByTicket(ticket)) continue;
+         if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+         if(PositionGetInteger(POSITION_MAGIC) != InpMagicNumber) continue;
+         if(PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY)
+           {
+            double vol   = PositionGetDouble(POSITION_VOLUME);
+            double price = PositionGetDouble(POSITION_PRICE_OPEN);
+            sumPriceVol += price * vol;
+            totalVol    += vol;
+           }
+        }
+      if(totalVol > 0.0)
+        {
+         double avgPrice = sumPriceVol / totalVol;
+         double profitPts = (tick.bid - avgPrice) / g_point;
+         double lossPts   = (avgPrice - tick.bid) / g_point;
+
+         if(profitPts >= InpGridBasketTpPoints)
+           {
+            PrintFormat("【多單籃子止盈出場】平均價格: %.5f, 當前Bid: %.5f, 獲利點數: %.1f", avgPrice, tick.bid, profitPts);
+            CloseAllPositions(1);
+           }
+         else if(InpGridBasketSlPoints > 0.0 && lossPts >= InpGridBasketSlPoints)
+           {
+            PrintFormat("【多單籃子硬停損熔斷】平均價格: %.5f, 當前Bid: %.5f, 虧損點數: %.1f", avgPrice, tick.bid, lossPts);
+            CloseAllPositions(1);
+           }
+        }
+     }
+
+   // 2. 空單籃子管理
+   int sellCount = CountOwnPositions(-1);
+   if(sellCount >= 2)
+     {
+      double sumPriceVol = 0.0;
+      double totalVol    = 0.0;
+      int total = PositionsTotal();
+      for(int i=0; i<total; i++)
+        {
+         ulong ticket = PositionGetTicket(i);
+         if(ticket==0 || !PositionSelectByTicket(ticket)) continue;
+         if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+         if(PositionGetInteger(POSITION_MAGIC) != InpMagicNumber) continue;
+         if(PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_SELL)
+           {
+            double vol   = PositionGetDouble(POSITION_VOLUME);
+            double price = PositionGetDouble(POSITION_PRICE_OPEN);
+            sumPriceVol += price * vol;
+            totalVol    += vol;
+           }
+        }
+      if(totalVol > 0.0)
+        {
+         double avgPrice = sumPriceVol / totalVol;
+         double profitPts = (avgPrice - tick.ask) / g_point;
+         double lossPts   = (tick.ask - avgPrice) / g_point;
+
+         if(profitPts >= InpGridBasketTpPoints)
+           {
+            PrintFormat("【空單籃子止盈出場】平均價格: %.5f, 當前Ask: %.5f, 獲利點數: %.1f", avgPrice, tick.ask, profitPts);
+            CloseAllPositions(-1);
+           }
+         else if(InpGridBasketSlPoints > 0.0 && lossPts >= InpGridBasketSlPoints)
+           {
+            PrintFormat("【空單籃子硬停損熔斷】平均價格: %.5f, 當前Ask: %.5f, 虧損點數: %.1f", avgPrice, tick.ask, lossPts);
+            CloseAllPositions(-1);
+           }
+        }
+     }
+  }
+
+//+------------------------------------------------------------------------+
 //| 開倉進場邏輯 (動態計算波段高低 + ATR 停損與固定盈虧比停利)             |
 //+------------------------------------------------------------------------+
 void OpenPosition(int direction, const MarketSnapshot &s, const string signalTag)
   {
-   if(InpOnePositionPerSide && CountOwnPositions(direction) > 0)
-      return;
+   int curPositions = CountOwnPositions(direction);
+   double lotScaleRatio = 1.0;
+   bool isPyramidEntry = false;
+
+   // 依加倉模式進行倉位數量檢查
+   if(InpScalingMode == SCALING_NONE)
+     {
+      if(InpOnePositionPerSide && curPositions > 0)
+         return;
+     }
+   else if(InpScalingMode == SCALING_GRID)
+     {
+      // 網格模式下，趨勢信號僅開首單，後續加倉交由 ManageGridScaling
+      if(curPositions > 0)
+         return;
+     }
+   else if(InpScalingMode == SCALING_PYRAMID || InpScalingMode == SCALING_BOTH)
+     {
+      if(curPositions > 0)
+        {
+         if(!CanOpenPyramid(direction, s.atr[IDX_LAST], lotScaleRatio))
+            return;
+         isPyramidEntry = true;
+        }
+     }
 
    // 順大勢 H4 閘門審查
    if(!PassesHtfFilter(direction))
@@ -652,13 +947,21 @@ void OpenPosition(int direction, const MarketSnapshot &s, const string signalTag
       return;
 
    double lot = CalculateLotSize(slDistance);
+   if(isPyramidEntry)
+     {
+      lot = NormalizeDouble(lot * lotScaleRatio, 2);
+      double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+      double maxLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+      if(lot < minLot) lot = minLot;
+      if(lot > maxLot) lot = maxLot;
+     }
    if(lot<=0.0)
       return;
 
    slPrice = NormalizeDouble(slPrice, g_digits);
    tpPrice = NormalizeDouble(tpPrice, g_digits);
 
-   string comment = InpTradeComment + "_" + signalTag;
+   string comment = InpTradeComment + "_" + signalTag + (isPyramidEntry ? "_Pyramid" : "");
 
    if(direction==1)
       trade.Buy(lot, _Symbol, 0.0, slPrice, tpPrice, comment);
@@ -793,14 +1096,14 @@ void UpdateDashboard(const MarketSnapshot &s)
      }
 
    string lines[8];
-   lines[0] = "【趨勢回撤旗艦系統 v2.0】";
+   lines[0] = "【趨勢回撤旗艦系統 v2.2】";
    lines[1] = StringFormat("帳戶餘額: $%.2f | 浮動: $%.2f", balance, floatPnL);
    lines[2] = StringFormat("商品/時框: %s (%s)", _Symbol, EnumToString(InpTimeframe));
    lines[3] = StringFormat("當前點差: %d pts (門檻 %d)", spread, (int)InpMaxSpreadPoints);
    lines[4] = StringFormat("ADX 強度: %.1f (門檻 %.1f)", s.adxMain[IDX_LAST], InpAdxMinThreshold);
    lines[5] = StringFormat("H4 趨勢閘門: %s", htfStatus);
-   lines[6] = StringFormat("多單持倉: %d | 空單持倉: %d", CountOwnPositions(1), CountOwnPositions(-1));
-   lines[7] = "風控機制: 保本(1.0) + 追蹤(1.8) + 週五避險";
+   lines[6] = StringFormat("加倉模式: %s (多 %d / 空 %d)", EnumToString(InpScalingMode), CountOwnPositions(1), CountOwnPositions(-1));
+   lines[7] = "風控機制: 保本(1.0) + 追蹤(1.8) + 籃子風控";
 
    for(int i=0; i<8; i++)
      {
@@ -841,10 +1144,14 @@ void OnTick()
    // 1. 每 tick 執行保本移損與動態移動鎖利管理
    ManageStops(s);
 
-   // 2. 更新儀表板顯示
+   // 2. 加倉模組：網格補倉檢查與籃子平倉管理 (方案 B / 複合模式)
+   ManageGridScaling(s);
+   ManageBasketOrders(s);
+
+   // 3. 更新儀表板顯示
    UpdateDashboard(s);
 
-   // 3. 進場訊號僅在新 K 棒生成 (剛收盤一根) 判定
+   // 4. 進場訊號僅在新 K 棒生成 (剛收盤一根) 判定
    if(!IsNewBar())
       return;
 
