@@ -12,9 +12,9 @@
 //|   6. 現代化圖表半透明視覺儀表板 (GUI Dashboard)                        |
 //+------------------------------------------------------------------------+
 #property copyright "Enterprise EA Development / Chinese Flagship Edition"
-#property version   "2.20"
+#property version   "3.00"
 #property strict
-#property description "自適應趨勢回撤交易系統 (Adaptive Trend Pullback EA) - 商業旗艦全功能加倉版"
+#property description "自適應趨勢回撤交易系統 (Adaptive Trend Pullback EA) - v3.0 旗艦版"
 
 #include <Trade\Trade.mqh>
 
@@ -57,7 +57,10 @@ input int                InpAtrPeriod         = 7;               // ATR 週期 (
 
 input group "=== 訊號與市場過濾 (Signal Filters) ==="
 input double             InpAdxMinThreshold   = 25.0;            // 最小 ADX 趨勢門檻 (低於此值視為盤整不開倉)
+input bool               InpUseDiFilter       = true;            // [v3] 啟用 ADX +DI/-DI 方向確認過濾 (過濾逆勢假信號)
 input double             InpRsiCrossLevel     = 50.0;            // RSI 穿越分水嶺 (預設 50 中軸)
+input double             InpRsiBuyZone        = 45.0;            // [v3] 做多 RSI 回踩區下限 (跌至此以下視為回踩到位)
+input double             InpRsiSellZone       = 55.0;            // [v3] 做空 RSI 回彈區上限 (升至此以上視為回彈到位)
 input int                InpSwingLookback     = 20;              // 波段高低點回溯根數 (Swing Lookback Bars)
 input double             InpMinEmaSeparationPts = 25;            // 快中均線最小間距 (點數，盤整黏合過濾)
 input double             InpMinAtrPoints      = 50;              // 最小 ATR 點數門檻 (過濾死寂市場)
@@ -76,21 +79,27 @@ input double             InpMaxSlPoints       = 350.0;           // 單筆最大
 input double             InpAtrSlBufferMult   = 0.20;            // [波段模式] ATR 停損外加緩衝倍數
 input double             InpMinSlAtrMult      = 1.00;            // [波段模式] 最小停損 ATR 倍數
 input double             InpRiskRewardRatio   = 1.80;            // [波段模式] 停利風險報酬比 (R:R)
-input bool               InpUseBreakEven      = false;           // 啟用第一階段保本機制 (預設關閉防利潤截斷)
-input double             InpBreakEvenAtrMult  = 1.4;             // 獲利達 x 倍 ATR 時觸發保本移損
+input bool               InpUseBreakEven      = true;            // [v3] 啟用第一階段保本機制 (首單保護)
+input double             InpBreakEvenAtrMult  = 1.2;             // 獲利達 x 倍 ATR 時觸發保本移損
 input double             InpBreakEvenBufferPts= 10;              // 保本加碼緩衝點數
-input bool               InpUseTrailingStop   = false;           // 啟用第二階段動態移動鎖利
-input double             InpTrailingStartAtrMult = 2.0;          // 獲利達 x 倍 ATR 後啟動移動鎖利
-input double             InpTrailingStepAtrMult  = 1.0;          // 移動鎖利跟隨距離 (x 倍 ATR)
+input bool               InpUseTrailingStop   = true;            // [v3] 啟用第二階段動態移動鎖利 (首單追蹤)
+input double             InpTrailingStartAtrMult = 1.8;          // 獲利達 x 倍 ATR 後啟動移動鎖利
+input double             InpTrailingStepAtrMult  = 0.8;          // 移動鎖利跟隨距離 (x 倍 ATR)
 
 input group "=== 部位與手數管理 (Position Sizing) ==="
 input ENUM_LOT_MODE      InpLotSizeMode       = LOT_MODE_FIXED;  // 手數計算模式 (固定手數 / 風險比例)
 input double             InpFixedLotSize      = 0.10;            // 固定手數大小 (固定手數模式生效)
 input double             InpRiskPercent       = 1.00;            // 每筆交易風險比例 % (風險比例模式生效)
+input bool               InpUseAntiMartingale = true;            // [v3] 啟用反馬丁：連虧時自動縮倉
+input int                InpAntiMartAfterLosses = 3;             // [v3] 連續虧損 ≥ N 筆後啟動縮倉
+input double             InpAntiMartLotFactor = 0.5;             // [v3] 縮倉手數比例 (正常的 50%)
 
 input group "=== 平倉冷卻與風控機制 (Cooldown Filter) ==="
 input bool               InpUseCooldown       = true;            // 啟用平倉後進場冷卻 (防洗盤連續割肉)
 input int                InpCooldownBars      = 3;               // 平倉後冷卻 K 棒根數 (Cooldown Bars)
+input bool               InpUseConsecLossFilter = true;          // [v3] 啟用連虧熔斷 (連續虧損後暫停開倉)
+input int                InpMaxConsecLosses   = 3;               // [v3] 觸發熔斷的連續虧損筆數
+input int                InpLossPauseBars     = 10;              // [v3] 熔斷後暫停交易的 K 棒根數
 
 input group "=== 交易時段與週末避險過濾 (Session & Weekend Guard) ==="
 input bool               InpUseSessionFilter  = true;            // 啟用交易時段過濾 (僅在指定窗口開倉)
@@ -169,6 +178,8 @@ struct MarketSnapshot
    double emaSlow[3];
    double rsi[3];
    double adxMain[3];
+   double adxPlus[3];    // [v3] +DI Buffer
+   double adxMinus[3];   // [v3] -DI Buffer
    double atr[3];
    double open[3];
    double high[3];
@@ -244,7 +255,7 @@ int OnInit()
    g_digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
    g_lastBarTime = 0;
 
-   Print("Adaptive Trend Pullback EA (商業旗艦全功能版 v2.00) 初始化成功。");
+   Print("Adaptive Trend Pullback EA (v3.0 旗艦版) 初始化成功。");
    return(INIT_SUCCEEDED);
   }
 
@@ -290,6 +301,8 @@ bool FillSnapshot(MarketSnapshot &s)
    if(CopyBuffer(hEmaSlow,   0, 1, 3, s.emaSlow)   != 3) return(false);
    if(CopyBuffer(hRsi,       0, 1, 3, s.rsi)       != 3) return(false);
    if(CopyBuffer(hAdx,       0, 1, 3, s.adxMain)   != 3) return(false);
+   if(CopyBuffer(hAdx,       1, 1, 3, s.adxPlus)   != 3) return(false);
+   if(CopyBuffer(hAdx,       2, 1, 3, s.adxMinus)  != 3) return(false);
    if(CopyBuffer(hAtr,       0, 1, 3, s.atr)       != 3) return(false);
 
    double o[3], h[3], l[3], c[3];
@@ -392,6 +405,81 @@ bool PassesCooldownFilter()
   }
 
 //+------------------------------------------------------------------------+
+//| [v3] 連續虧損熔斷過濾 (Consecutive Loss Circuit Breaker)                |
+//+------------------------------------------------------------------------+
+bool PassesConsecLossFilter()
+  {
+   if(!InpUseConsecLossFilter || InpMaxConsecLosses <= 0) return(true);
+
+   datetime fromTime = TimeCurrent() - 30 * 86400;
+   if(!HistorySelect(fromTime, TimeCurrent())) return(true);
+
+   int consecLosses = 0;
+   datetime lastLossTime = 0;
+
+   int totalDeals = HistoryDealsTotal();
+   for(int i = totalDeals - 1; i >= 0; i--)
+     {
+      ulong ticket = HistoryDealGetTicket(i);
+      if(ticket == 0) continue;
+      if(HistoryDealGetString(ticket, DEAL_SYMBOL) != _Symbol) continue;
+      if(HistoryDealGetInteger(ticket, DEAL_MAGIC) != InpMagicNumber) continue;
+
+      ENUM_DEAL_ENTRY entry = (ENUM_DEAL_ENTRY)HistoryDealGetInteger(ticket, DEAL_ENTRY);
+      if(entry == DEAL_ENTRY_OUT || entry == DEAL_ENTRY_INOUT)
+        {
+         double profit = HistoryDealGetDouble(ticket, DEAL_PROFIT) + HistoryDealGetDouble(ticket, DEAL_COMMISSION) + HistoryDealGetDouble(ticket, DEAL_SWAP);
+         if(profit < 0.0)
+           {
+            consecLosses++;
+            if(consecLosses == 1)
+               lastLossTime = (datetime)HistoryDealGetInteger(ticket, DEAL_TIME);
+           }
+         else
+            break; // 遇到盈利單，連虧中止
+        }
+     }
+
+   if(consecLosses >= InpMaxConsecLosses && lastLossTime > 0)
+     {
+      int barsSinceLastLoss = iBarShift(_Symbol, InpTimeframe, lastLossTime);
+      if(barsSinceLastLoss >= 0 && barsSinceLastLoss < InpLossPauseBars)
+         return(false); // 仍在熔斷冷靜期
+     }
+   return(true);
+  }
+
+//+------------------------------------------------------------------------+
+//| [v3] 計算最近連續虧損筆數 (供反馬丁縮倉使用)                            |
+//+------------------------------------------------------------------------+
+int GetRecentConsecLosses()
+  {
+   datetime fromTime = TimeCurrent() - 30 * 86400;
+   if(!HistorySelect(fromTime, TimeCurrent())) return(0);
+
+   int consecLosses = 0;
+   int totalDeals = HistoryDealsTotal();
+   for(int i = totalDeals - 1; i >= 0; i--)
+     {
+      ulong ticket = HistoryDealGetTicket(i);
+      if(ticket == 0) continue;
+      if(HistoryDealGetString(ticket, DEAL_SYMBOL) != _Symbol) continue;
+      if(HistoryDealGetInteger(ticket, DEAL_MAGIC) != InpMagicNumber) continue;
+
+      ENUM_DEAL_ENTRY entry = (ENUM_DEAL_ENTRY)HistoryDealGetInteger(ticket, DEAL_ENTRY);
+      if(entry == DEAL_ENTRY_OUT || entry == DEAL_ENTRY_INOUT)
+        {
+         double profit = HistoryDealGetDouble(ticket, DEAL_PROFIT) + HistoryDealGetDouble(ticket, DEAL_COMMISSION) + HistoryDealGetDouble(ticket, DEAL_SWAP);
+         if(profit < 0.0)
+            consecLosses++;
+         else
+            break;
+        }
+     }
+   return(consecLosses);
+  }
+
+//+------------------------------------------------------------------------+
 //| 大週期趨勢閘門過濾 (Higher-TF Gate)                                     |
 //+------------------------------------------------------------------------+
 bool PassesHtfFilter(int direction)
@@ -455,30 +543,39 @@ int CheckPullbackSignal(const MarketSnapshot &s)
                             s.emaMedium[IDX_LAST] < s.emaSlow[IDX_LAST] &&
                             s.close[IDX_LAST] < s.emaSlow[IDX_LAST]);
 
-   bool rsiCrossUp   = (s.rsi[IDX_PREV1] < InpRsiCrossLevel && s.rsi[IDX_LAST] > InpRsiCrossLevel);
-   bool rsiCrossDown = (s.rsi[IDX_PREV1] > InpRsiCrossLevel && s.rsi[IDX_LAST] < InpRsiCrossLevel);
+   // [v3] RSI 回踩區域觸發：RSI 曾下探至回踩區 → 再反彈回中軸以上
+   bool rsiPullbackUp   = (s.rsi[IDX_PREV1] <= InpRsiBuyZone  && s.rsi[IDX_LAST] > InpRsiCrossLevel);
+   bool rsiPullbackDown = (s.rsi[IDX_PREV1] >= InpRsiSellZone && s.rsi[IDX_LAST] < InpRsiCrossLevel);
 
    // 做多條件
    if(trendUpAligned)
      {
+      // [v3] ADX +DI/-DI 方向確認
+      if(InpUseDiFilter && s.adxPlus[IDX_LAST] <= s.adxMinus[IDX_LAST])
+         return(0); // +DI 未佔優，不做多
+
       bool pulledBack = (s.low[IDX_LAST] <= s.emaFast[IDX_LAST] || s.low[IDX_LAST] <= s.emaMedium[IDX_LAST]);
       bool noCloseBelowMedium = (s.close[IDX_LAST] >= s.emaMedium[IDX_LAST]);
       bool bullishCandle = (s.close[IDX_LAST] > s.open[IDX_LAST]);
       bool confirmation  = (s.close[IDX_LAST] > s.high[IDX_PREV1]);
 
-      if(pulledBack && noCloseBelowMedium && rsiCrossUp && bullishCandle && confirmation)
+      if(pulledBack && noCloseBelowMedium && rsiPullbackUp && bullishCandle && confirmation)
          return(1);
      }
 
    // 做空條件
    if(trendDownAligned)
      {
+      // [v3] ADX +DI/-DI 方向確認
+      if(InpUseDiFilter && s.adxMinus[IDX_LAST] <= s.adxPlus[IDX_LAST])
+         return(0); // -DI 未佔優，不做空
+
       bool pulledBack = (s.high[IDX_LAST] >= s.emaFast[IDX_LAST] || s.high[IDX_LAST] >= s.emaMedium[IDX_LAST]);
       bool noCloseAboveMedium = (s.close[IDX_LAST] <= s.emaMedium[IDX_LAST]);
       bool bearishCandle = (s.close[IDX_LAST] < s.open[IDX_LAST]);
       bool confirmation  = (s.close[IDX_LAST] < s.low[IDX_PREV1]);
 
-      if(pulledBack && noCloseAboveMedium && rsiCrossDown && bearishCandle && confirmation)
+      if(pulledBack && noCloseAboveMedium && rsiPullbackDown && bearishCandle && confirmation)
          return(-1);
      }
 
@@ -585,6 +682,17 @@ double CalculateLotSize(double slDistance)
 
    if(lot < minLot) lot = minLot;
    if(lot > maxLot) lot = maxLot;
+
+   // [v3] 反馬丁縮倉：連續虧損過多時自動縮小手數
+   if(InpUseAntiMartingale)
+     {
+      int cLosses = GetRecentConsecLosses();
+      if(cLosses >= InpAntiMartAfterLosses)
+        {
+         lot = NormalizeDouble(lot * InpAntiMartLotFactor, 2);
+         if(lot < minLot) lot = minLot;
+        }
+     }
 
    return(NormalizeDouble(lot, 2));
   }
@@ -1165,6 +1273,10 @@ void OnTick()
 
    // 6. 平倉後冷卻期過濾
    if(!PassesCooldownFilter())
+      return;
+
+   // 6.5 [v3] 連續虧損熔斷過濾
+   if(!PassesConsecLossFilter())
       return;
 
    // 7. 市場雜訊與波動度過濾 (點差 / ATR / 均線黏合 / ADX)
