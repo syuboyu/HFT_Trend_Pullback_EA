@@ -12,9 +12,9 @@
 //|   6. 現代化圖表半透明視覺儀表板 (GUI Dashboard)                        |
 //+------------------------------------------------------------------------+
 #property copyright "Enterprise EA Development / Chinese Flagship Edition"
-#property version   "2.00"
+#property version   "2.20"
 #property strict
-#property description "自適應趨勢回撤交易系統 (Adaptive Trend Pullback EA) - 商業旗艦全功能版"
+#property description "自適應趨勢回撤交易系統 (Adaptive Trend Pullback EA) - 商業旗艦全功能加倉版"
 
 #include <Trade\Trade.mqh>
 
@@ -110,7 +110,7 @@ input double             InpBreakoutRsiBuyMin = 55.0;            // 突破做多
 input double             InpBreakoutRsiSellMax= 45.0;            // 突破做空最大 RSI (低於此值確認弱勢)
 
 input group "=== 倉位加倉管理模組 (Scaling Engine) ==="
-input ENUM_SCALING_MODE  InpScalingMode       = SCALING_NONE;    // 加倉模式 (None / Pyramid / Grid / Both)
+input ENUM_SCALING_MODE  InpScalingMode       = SCALING_GRID;    // 加倉模式 (預設 SCALING_GRID: 方案 B 回調補倉)
 input int                InpMaxPyramidOrders  = 2;               // [方案 A] 金字塔最大加碼次數 (含首單最多 1+N 筆)
 input double             InpPyramidTriggerAtr = 1.0;             // [方案 A] 金字塔加碼門檻 (前單浮盈達 N 倍 ATR 且已保本)
 input double             InpPyramidLotRatio   = 1.0;             // [方案 A] 金字塔加碼手數比例 (1.0=等額, 0.5=減半)
